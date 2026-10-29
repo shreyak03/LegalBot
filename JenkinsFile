@@ -51,4 +51,136 @@ pipeline {
             echo 'Pipeline failed. Check the failed stage logs.'
         }
     }
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        IMAGE_NAME = 'legalbot:latest'
+        CONTAINER_NAME = 'legalbot-container'
+        HOST_PORT = '8000'
+        CONTAINER_PORT = '8000'
+
+        // Existing Python virtual environment
+        PYTHON_EXE = 'D:\\Btech\\GenAI\\LegalBot\\.venv\\Scripts\\python.exe'
+
+        // Existing project environment file; never commit this file
+        ENV_FILE = 'D:\\Btech\\GenAI\\LegalBot\\.env'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out LegalBot source code'
+                checkout scm
+            }
+        }
+
+        stage('Verify Environment') {
+            steps {
+                bat '''
+                    echo Checking Python installation...
+                    if not exist "%PYTHON_EXE%" (
+                        echo ERROR: Python executable not found at %PYTHON_EXE%
+                        exit /b 1
+                    )
+                    "%PYTHON_EXE%" --version
+
+                    echo Checking Docker...
+                    docker --version
+                    if errorlevel 1 exit /b 1
+
+                    echo Checking required project files...
+                    if not exist requirements.txt (
+                        echo ERROR: requirements.txt not found
+                        exit /b 1
+                    )
+                    if not exist Dockerfile (
+                        echo ERROR: Dockerfile not found
+                        exit /b 1
+                    )
+                '''
+            }
+        }
+
+        stage('Install Test Dependencies') {
+            steps {
+                bat '''
+                    "%PYTHON_EXE%" -m pip install --upgrade pip
+                    if errorlevel 1 exit /b 1
+
+                    "%PYTHON_EXE%" -m pip install -r requirements.txt
+                    if errorlevel 1 exit /b 1
+
+                    "%PYTHON_EXE%" -m pip install pytest
+                    if errorlevel 1 exit /b 1
+                '''
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                bat '''
+                    "%PYTHON_EXE%" -m pytest -v
+                    if errorlevel 1 exit /b 1
+                '''
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                bat '''
+                    docker build -t %IMAGE_NAME% .
+                    if errorlevel 1 exit /b 1
+                '''
+            }
+        }
+
+        stage('Deploy Container') {
+            steps {
+                bat '''
+                    if not exist "%ENV_FILE%" (
+                        echo ERROR: Environment file not found at %ENV_FILE%
+                        exit /b 1
+                    )
+
+                    docker rm -f %CONTAINER_NAME% 2>NUL
+                    docker run -d --name %CONTAINER_NAME% --restart unless-stopped --env-file "%ENV_FILE%" -p %HOST_PORT%:%CONTAINER_PORT% %IMAGE_NAME%
+                    if errorlevel 1 exit /b 1
+                '''
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                bat '''
+                    echo Waiting for the API to start...
+                    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok = $false; for ($i = 0; $i -lt 12; $i++) { try { $r = Invoke-WebRequest -Uri 'http://localhost:8000/health' -UseBasicParsing -TimeoutSec 5; if ($r.StatusCode -eq 200) { $r.Content; $ok = $true; break } } catch { Start-Sleep -Seconds 5 } }; if (-not $ok) { docker logs legalbot-container; exit 1 }"
+                    if errorlevel 1 exit /b 1
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'SUCCESS: LegalBot tests passed, Docker image built, and deployment verified.'
+            bat 'docker ps --filter "name=legalbot-container"'
+        }
+
+        failure {
+            echo 'FAILURE: LegalBot pipeline failed. Review the failed stage and console output.'
+            bat 'docker ps -a --filter "name=legalbot-container"'
+        }
+
+        always {
+            echo 'LegalBot CI/CD pipeline execution completed.'
+        }
+    }
+}
+
 }
