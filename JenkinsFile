@@ -2,58 +2,6 @@
 pipeline {
     agent any
 
-    stages {
-        stage('Checkout') {
-            steps {
-                echo 'Checking out LegalBot source code'
-                checkout scm
-            }
-        }
-
-        stage('Install Test Dependencies') {
-            steps {
-                bat 'py -3.11 -m pip install -r requirements.txt'
-                bat 'py -3.11 -m pip install pytest'
-            }
-        }
-
-        stage('Run Tests') {
-            steps {
-                bat 'py -3.11 -m pytest -v'
-            }
-        }
-
-        stage('Build Docker Image') {
-            steps {
-                bat 'docker build -t legalbot:latest .'
-            }
-        }
-
-        stage('Deploy Container') {
-            steps {
-                bat 'docker rm -f legalbot-container 2>NUL || exit /b 0'
-                bat 'docker run -d --name legalbot-container --env-file "D:\\Btech\\GenAI\\LegalBot\\.env" -p 8000:8000 legalbot:latest'
-            }
-        }
-
-        stage('Verify Deployment') {
-            steps {
-                bat 'powershell -NoProfile -Command "$r = Invoke-WebRequest -Uri http://localhost:8000/health -TimeoutSec 30; if ($r.StatusCode -ne 200) { exit 1 }; Write-Output $r.Content"'
-            }
-        }
-    }
-
-    post {
-        success {
-            echo 'LegalBot pipeline completed successfully.'
-        }
-        failure {
-            echo 'Pipeline failed. Check the failed stage logs.'
-        }
-    }
-pipeline {
-    agent any
-
     options {
         timestamps()
         disableConcurrentBuilds()
@@ -64,11 +12,7 @@ pipeline {
         CONTAINER_NAME = 'legalbot-container'
         HOST_PORT = '8000'
         CONTAINER_PORT = '8000'
-
-        // Existing Python virtual environment
         PYTHON_EXE = 'D:\\Btech\\GenAI\\LegalBot\\.venv\\Scripts\\python.exe'
-
-        // Existing project environment file; never commit this file
         ENV_FILE = 'D:\\Btech\\GenAI\\LegalBot\\.env'
     }
 
@@ -83,26 +27,16 @@ pipeline {
         stage('Verify Environment') {
             steps {
                 bat '''
-                    echo Checking Python installation...
                     if not exist "%PYTHON_EXE%" (
-                        echo ERROR: Python executable not found at %PYTHON_EXE%
+                        echo ERROR: Python executable not found.
                         exit /b 1
                     )
                     "%PYTHON_EXE%" --version
-
-                    echo Checking Docker...
                     docker --version
                     if errorlevel 1 exit /b 1
 
-                    echo Checking required project files...
-                    if not exist requirements.txt (
-                        echo ERROR: requirements.txt not found
-                        exit /b 1
-                    )
-                    if not exist Dockerfile (
-                        echo ERROR: Dockerfile not found
-                        exit /b 1
-                    )
+                    if not exist requirements.txt exit /b 1
+                    if not exist Dockerfile exit /b 1
                 '''
             }
         }
@@ -110,12 +44,8 @@ pipeline {
         stage('Install Test Dependencies') {
             steps {
                 bat '''
-                    "%PYTHON_EXE%" -m pip install --upgrade pip
-                    if errorlevel 1 exit /b 1
-
                     "%PYTHON_EXE%" -m pip install -r requirements.txt
                     if errorlevel 1 exit /b 1
-
                     "%PYTHON_EXE%" -m pip install pytest
                     if errorlevel 1 exit /b 1
                 '''
@@ -144,7 +74,7 @@ pipeline {
             steps {
                 bat '''
                     if not exist "%ENV_FILE%" (
-                        echo ERROR: Environment file not found at %ENV_FILE%
+                        echo ERROR: Environment file not found.
                         exit /b 1
                     )
 
@@ -158,7 +88,6 @@ pipeline {
         stage('Verify Deployment') {
             steps {
                 bat '''
-                    echo Waiting for the API to start...
                     powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok = $false; for ($i = 0; $i -lt 12; $i++) { try { $r = Invoke-WebRequest -Uri 'http://localhost:8000/health' -UseBasicParsing -TimeoutSec 5; if ($r.StatusCode -eq 200) { $r.Content; $ok = $true; break } } catch { Start-Sleep -Seconds 5 } }; if (-not $ok) { docker logs legalbot-container; exit 1 }"
                     if errorlevel 1 exit /b 1
                 '''
@@ -168,12 +97,12 @@ pipeline {
 
     post {
         success {
-            echo 'SUCCESS: LegalBot tests passed, Docker image built, and deployment verified.'
+            echo 'SUCCESS: Tests passed and LegalBot deployment was verified.'
             bat 'docker ps --filter "name=legalbot-container"'
         }
 
         failure {
-            echo 'FAILURE: LegalBot pipeline failed. Review the failed stage and console output.'
+            echo 'FAILURE: Check the failed stage in Console Output.'
             bat 'docker ps -a --filter "name=legalbot-container"'
         }
 
@@ -181,6 +110,4 @@ pipeline {
             echo 'LegalBot CI/CD pipeline execution completed.'
         }
     }
-}
-
 }
