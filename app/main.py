@@ -1,0 +1,223 @@
+
+"""FastAPI Application for LegalBot — Multi-Agent Legal Assistant.
+
+Provides:
+- GET /: Serves the frontend single-page interface.
+- POST /ask: Coordinates the three Agno agents.
+- GET /health: Reports application health and active model configuration.
+"""
+
+import asyncio
+import logging
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
+from app import config
+from app.agents.legal_team import AGENT_NAMES, run_legal_workflow
+from app.schemas import (
+    HealthResponse,
+    LegalBotResponse,
+    LegalQuestionRequest,
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("legalbot")
+
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "static"
+
+app = FastAPI(
+    title="LegalBot — Multi-Agent Legal Assistant",
+    description=(
+        "Collaborative multi-agent legal guidance powered by "
+        "Agno and a configurable LLM provider."
+    ),
+    version="1.0.0",
+)
+
+# CORS configuration for local development.
+# Restrict origins before deploying publicly.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
+
+# Mount static assets if the directory exists.
+if STATIC_DIR.exists():
+    app.mount(
+        "/static",
+        StaticFiles(directory=str(STATIC_DIR)),
+        name="static",
+    )
+
+
+@app.get(
+    "/",
+    summary="Serve LegalBot Frontend",
+    response_class=FileResponse,
+)
+async def serve_frontend():
+    """Serve the single-page HTML application."""
+    index_file = STATIC_DIR / "index.html"
+
+    if not index_file.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Frontend index.html file was not found.",
+        )
+
+    return FileResponse(str(index_file), media_type="text/html")
+
+
+@app.get(
+    "/health",
+    summary="Health Check",
+    response_model=HealthResponse,
+)
+async def health_check() -> HealthResponse:
+    """Report application and provider configuration status."""
+    return HealthResponse(
+        status="healthy",
+        app_name="LegalBot — Multi-Agent Legal Assistant",
+        groq_configured=config.is_groq_configured(),
+        model=config.get_active_model_name(),
+        agents=AGENT_NAMES,
+    )
+
+
+@app.post(
+    "/ask",
+    summary="Ask Legal Question",
+    response_model=LegalBotResponse,
+)
+async def ask_question(
+    request: LegalQuestionRequest,
+) -> LegalBotResponse:
+    """Process a legal question through the multi-agent workflow."""
+
+    # Validate provider configuration before running the agents.
+    if not config.is_provider_configured():
+        logger.warning(
+            "Request rejected because the active provider is not configured."
+        )
+
+        if config.MODEL_PROVIDER == "groq":
+            detail = (
+                "Groq API key is not configured. Add GROQ_API_KEY "
+                "to your .env file. Get a key at "
+                "https://console.groq.com/keys"
+            )
+        elif config.MODEL_PROVIDER == "google":
+            detail = (
+                "Google Gemini API key is not configured. Add "
+                "GEMINI_API_KEY to your .env file. Get a key at "
+                "https://aistudio.google.com/apikey"
+            )
+        else:
+            detail = (
+                f"Unsupported model provider: {config.MODEL_PROVIDER}. "
+                "Set MODEL_PROVIDER to 'groq' or 'google' in .env."
+            )
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=detail,
+        )
+
+    logger.info(
+        "Processing legal inquiry (length=%d characters).",
+        len(request.question),
+    )
+
+    try:
+        # Execute the synchronous Agno workflow in a worker thread.
+        workflow_task = asyncio.to_thread(
+            run_legal_workflow,
+            request.question,
+        )
+
+        result = await asyncio.wait_for(
+            workflow_task,
+            timeout=config.REQUEST_TIMEOUT,
+        )
+
+        if not isinstance(result, dict):
+            logger.error("Legal workflow returned an unexpected result.")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="The legal agents returned an invalid response.",
+            )
+
+        return LegalBotResponse(
+            status="success",
+            question=request.question,
+            answer=result.get(
+                "answer",
+                "No answer was generated by the agent team.",
+            ),
+            sources=result.get("sources", []),
+            disclaimer=config.LEGAL_DISCLAIMER,
+        )
+
+    except asyncio.TimeoutError:
+        logger.error(
+            "Legal research workflow timed out after %d seconds.",
+            config.REQUEST_TIMEOUT,
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=(
+                f"Analysis timed out after {config.REQUEST_TIMEOUT} "
+                "seconds. Please try a simpler question."
+            ),
+        ) from None
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        # Redact API keys before logging any exception text.
+        error_msg = str(exc)
+
+        for secret in (
+            config.GROQ_API_KEY,
+            config.GEMINI_API_KEY,
+        ):
+            if secret:
+                error_msg = error_msg.replace(secret, "[REDACTED]")
+
+        logger.error(
+            "Legal workflow failed: %s",
+            error_msg,
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "An error occurred while coordinating the legal agents. "
+                "Check the application logs for details."
+            ),
+        ) from None
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "app.main:app",
+        host=config.HOST,
+        port=config.PORT,
+        reload=True,
+    )
